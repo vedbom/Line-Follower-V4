@@ -51,21 +51,25 @@ UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 typedef enum{
-	idle, follow_line, turn_right, turn_left, retrace, finish
+	idle, follow_line, follow_line_until_turn, turn_right, turn_left, turn_around, t_intersection, finish
 } state;
 
 state robot_state = idle;
 
 uint8_t sw_pushed = 0;
+
 char msg[100] = "";
+
 uint8_t left2 = 0;
 uint8_t left1 = 0;
 uint8_t center = 0;
 uint8_t right1 = 0;
 uint8_t right2 = 0;
 
-uint8_t slow_pulse_width = 45;			// in percentage!
-uint8_t fast_pulse_width = 90;
+uint8_t after_turn_around = 0;
+
+uint8_t slow_pulse_width = 50;			// in percentage!
+uint8_t fast_pulse_width = 98;
 
 uint32_t front_left_enc_count = 0;
 uint32_t front_right_enc_count = 0;
@@ -74,7 +78,7 @@ uint32_t back_right_enc_count = 0;
 
 // variables required for turning the robot
 uint32_t wheel_enc_count[4] = {0, 0, 0, 0};		// front left, front right, back left, back right
-uint32_t travel_dist = 5;						// distance the robot must travel, in encoder indentations, before making a turn
+//uint32_t travel_dist = 5;						// distance the robot must travel, in encoder indentations, before making a turn
 
 //uint16_t pulse_val = 0;		        // set the capture/compare register to this value to generate a PWM signal with Ton corresponding to the pulse width
 //uint16_t inv_pulse_val = 0;			// set the capture/compare register to this value to generate a PWM signal with Toff corresponding to the pulse width
@@ -95,6 +99,8 @@ void move_backward(void);
 void steer_right(void);
 void steer_left(void);
 void stop(void);
+void record_current_enc_pos(void);
+uint8_t suff_dist_traveled(uint32_t travel_dist);
 
 uint16_t calc_pulse_val(TIM_HandleTypeDef *htim, uint8_t pulse_width);
 uint16_t calc_inv_pulse_val(TIM_HandleTypeDef *htim, uint8_t pulse_width);
@@ -170,17 +176,19 @@ int main(void)
 				  sw_pushed = 0;
 				  robot_state = follow_line;
 			  }
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "idle\r\n", strlen("idle\r\n"));
 			  break;
 		  case follow_line:
-			  if (right1 && !left1) {
+			  if (left2 && left1 && center && right1 && right2) {
+				  sw_pushed = 0;
+				  record_current_enc_pos();
+				  robot_state = t_intersection;
+			  }
+			  else if (right1 && !left1) {
 				  steer_right();
 			  }
 			  else if (left1 && !right1) {
 				  steer_left();
-			  }
-			  else if (left2 && left1 && center && right1 && right2) {
-				  sw_pushed = 0;
-				  robot_state = finish;
 			  }
 			  else {
 				  move_forward();
@@ -188,43 +196,129 @@ int main(void)
 
 			  if (sw_pushed) {
 				  sw_pushed = 0;
-				  robot_state = retrace;
+				  record_current_enc_pos();
+				  robot_state = turn_around;
 			  }
+
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "follow_line\r\n", strlen("follow_line\r\n"));
+			  break;
+		  case follow_line_until_turn:
+			  if (left2 && left1 && center && right1 && right2) {
+				  sw_pushed = 0;
+				  record_current_enc_pos();
+				  robot_state = t_intersection;
+			  }
+			  else if (right2) {
+				  record_current_enc_pos();
+				  robot_state = turn_right;
+			  }
+			  else if (left2) {
+				  record_current_enc_pos();
+				  robot_state = turn_left;
+			  }
+			  else if (right1 && !left1) {
+				  steer_right();
+			  }
+			  else if (left1 && !right1) {
+				  steer_left();
+			  }
+			  else {
+				  move_forward();
+			  }
+
+			  if (sw_pushed) {
+				  sw_pushed = 0;
+				  robot_state = idle;
+			  }
+
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "follow_line_until_turn\r\n", strlen("follow_line_until_turn\r\n"));
 			  break;
 		  case turn_right:
-			  if ((front_left_enc_count - wheel_enc_count[0]) >= travel_dist &&
-					  (front_right_enc_count - wheel_enc_count[1]) >= travel_dist &&
-					  (back_left_enc_count - wheel_enc_count[2]) >= travel_dist &&
-					  (back_right_enc_count - wheel_enc_count[3]) >= travel_dist) {
+			  if (suff_dist_traveled(5)) {
 				  if (center) {
-					  robot_state = follow_line;
+					  if (after_turn_around) {
+						  after_turn_around = 0;
+						  robot_state = follow_line_until_turn;
+					  }
+					  else {
+						  robot_state = follow_line;
+					  }
 				  }
 				  else {
 					  steer_right();
 				  }
 			  }
 			  else {
-				  move_forward();
+				  steer_right();
 			  }
 
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
+
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "turn_right\r\n", strlen("turn_right\r\n"));
 			  break;
 		  case turn_left:
-			  if ((front_left_enc_count - wheel_enc_count[0]) >= travel_dist &&
-					  (front_right_enc_count - wheel_enc_count[1]) >= travel_dist &&
-					  (back_left_enc_count - wheel_enc_count[2]) >= travel_dist &&
-					  (back_right_enc_count - wheel_enc_count[3]) >= travel_dist) {
+			  if (suff_dist_traveled(5)) {
 				  if (center) {
-					  robot_state = follow_line;
+					  if (after_turn_around) {
+						  after_turn_around = 0;
+						  robot_state = follow_line_until_turn;
+					  }
+					  else {
+						  robot_state = follow_line;
+					  }
 				  }
 				  else {
 					  steer_left();
 				  }
 			  }
 			  else {
+				  steer_left();
+			  }
+
+			  if (sw_pushed) {
+				  sw_pushed = 0;
+				  robot_state = idle;
+			  }
+
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "turn_left\r\n", strlen("turn_left\r\n"));
+			  break;
+		  case turn_around:
+			  // while in this state turn the robot around 180 degrees back onto the path it has already traversed
+			  if (suff_dist_traveled(5)) {
+
+				  after_turn_around = 1;
+
+				  record_current_enc_pos();
+
+				  // the robot will always turn left
+				  robot_state = turn_left;
+			  }
+			  else {
+				  move_backward();
+			  }
+
+
+			  if (sw_pushed) {
+				  sw_pushed = 0;
+				  robot_state = idle;
+			  }
+
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "turn_around\r\n", strlen("turn_around\r\n"));
+			  break;
+		  case t_intersection:
+			  if (suff_dist_traveled(2)) {
+				  if (left2 && left1 && center && right1 && right2) {
+					  sw_pushed = 0;
+					  robot_state = finish;
+				  }
+				  else {
+					  robot_state = turn_right;
+				  }
+			  }
+			  else {
 				  move_forward();
 			  }
 
@@ -232,40 +326,8 @@ int main(void)
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-			  break;
-		  case retrace:
-			  if (right2) {
-				  wheel_enc_count[0] = front_left_enc_count;
-				  wheel_enc_count[1] = front_right_enc_count;
-				  wheel_enc_count[2] = back_left_enc_count;
-				  wheel_enc_count[3] = back_right_enc_count;
-				  robot_state = turn_right;
-			  }
-			  else if (left2) {
-				  wheel_enc_count[0] = front_left_enc_count;
-				  wheel_enc_count[1] = front_right_enc_count;
-				  wheel_enc_count[2] = back_left_enc_count;
-				  wheel_enc_count[3] = back_right_enc_count;
-				  robot_state = turn_left;
-			  }
-			  else if (right1 && !left1) {
-				  steer_left();
-			  }
-			  else if (left1 && !right1) {
-				  steer_right();
-			  }
-			  else if (left2 && left1 && center && right1 && right2) {
-				  sw_pushed = 0;
-				  robot_state = finish;
-			  }
-			  else {
-				  move_backward();
-			  }
 
-			  if (sw_pushed) {
-				  sw_pushed = 0;
-				  robot_state = idle;
-			  }
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "t_intersection\r\n", strlen("t_intersection\r\n"));
 			  break;
 		  case finish:
 			  stop();
@@ -273,6 +335,8 @@ int main(void)
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
+
+			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "finish\r\n", strlen("finish\r\n"));
 			  break;
 		  default:
 			  break;
@@ -707,6 +771,25 @@ uint16_t calc_inv_pulse_val(TIM_HandleTypeDef *htim, uint8_t pulse_width) {
 	return (uint16_t) (((float) (100 - pulse_width) / 100.0) * htim->Init.Period);
 }
 
+void record_current_enc_pos(void) {
+	wheel_enc_count[0] = front_left_enc_count;
+	wheel_enc_count[1] = front_right_enc_count;
+	wheel_enc_count[2] = back_left_enc_count;
+	wheel_enc_count[3] = back_right_enc_count;
+}
+
+uint8_t suff_dist_traveled(uint32_t travel_dist) {
+	if ((front_left_enc_count - wheel_enc_count[0]) >= travel_dist &&
+	    (front_right_enc_count - wheel_enc_count[1]) >= travel_dist &&
+		(back_left_enc_count - wheel_enc_count[2]) >= travel_dist &&
+		(back_right_enc_count - wheel_enc_count[3]) >= travel_dist) {
+		return 1;
+	}
+	else {
+		return 0;
+	}
+}
+
 void move_forward(void) {
 	// code using PWM generation
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, slow_pulse_width));
@@ -835,8 +918,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	}
 	else if (htim->Instance == TIM16) {
 		// transmit the state of the IR sensors over UART
-		sprintf(msg, "IR sensors left to right: %d	%d	%d	%d	%d	Encoders: fl %lu fr %lu bl %lu br %lu\n\r", left2, left1, center, right1, right2, front_left_enc_count, front_right_enc_count, back_left_enc_count, back_right_enc_count);
-		HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
+		//sprintf(msg, "IR sensors left to right: %d	%d	%d	%d	%d	Encoders: fl %lu fr %lu bl %lu br %lu\n\r", left2, left1, center, right1, right2, front_left_enc_count, front_right_enc_count, back_left_enc_count, back_right_enc_count);
+		//HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
 	}
 	else {
 
