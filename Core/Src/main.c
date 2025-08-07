@@ -41,11 +41,11 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim3;
-TIM_HandleTypeDef htim6;
-TIM_HandleTypeDef htim16;
+TIM_HandleTypeDef htim1;						// timer used in PWM mode to drive the robot's right motors
+TIM_HandleTypeDef htim2;						// timer used in PWM mode to drive the robot's left motors
+TIM_HandleTypeDef htim3;						// timer used in input capture mode to measure the encoders connected to the robot's wheels
+TIM_HandleTypeDef htim6;						// timer used to debounce the bumper switch in front of the robot
+TIM_HandleTypeDef htim16;						// timer used to intermittently send updates regarding the robot's state using the wireless transmitter
 
 UART_HandleTypeDef huart1;
 
@@ -60,6 +60,7 @@ uint8_t sw_pushed = 0;
 
 char msg[100] = "";
 
+// state of the IR sensors under the robot (0 = white and 1 = black)
 uint8_t left2 = 0;
 uint8_t left1 = 0;
 uint8_t center = 0;
@@ -68,20 +69,18 @@ uint8_t right2 = 0;
 
 uint8_t after_turn_around = 0;
 
-uint8_t slow_pulse_width = 50;			// in percentage!
-uint8_t fast_pulse_width = 98;
+uint8_t slow_pulse_width = 50;					// pulse width of the signal that drives the motors to move the robot slowly (in percentage!)
+uint8_t fast_pulse_width = 98;					// pulse width of the signal that drives the motors to move the robot fast (in percentage!)
 
+// variables to keep track of the current encoder count from the timer
 uint32_t front_left_enc_count = 0;
 uint32_t front_right_enc_count = 0;
 uint32_t back_left_enc_count = 0;
 uint32_t back_right_enc_count = 0;
 
-// variables required for turning the robot
+// variables to keep track of the previous encoder count from the timer
 uint32_t wheel_enc_count[4] = {0, 0, 0, 0};		// front left, front right, back left, back right
-//uint32_t travel_dist = 5;						// distance the robot must travel, in encoder indentations, before making a turn
 
-//uint16_t pulse_val = 0;		        // set the capture/compare register to this value to generate a PWM signal with Ton corresponding to the pulse width
-//uint16_t inv_pulse_val = 0;			// set the capture/compare register to this value to generate a PWM signal with Toff corresponding to the pulse width
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -169,72 +168,89 @@ int main(void)
 	  right2 = (HAL_GPIO_ReadPin(right2_ir_GPIO_Port, right2_ir_Pin) == GPIO_PIN_SET) ? 1 : 0;
 
 	  // create a state machine to control the robot
+	  /*
+	   * Note: The control logic for the robot works as follows: the robot will continue moving on it's current path until it runs into an obstacle that
+	   * presses it's bumper switch. Then the robot will turn around and take the first turn in the path that it encounters. If the bumper switch is
+	   * pressed before it has made it's turn, the robot will stop and shift into idle mode. After the robot makes it's turn, it will shift back into
+	   * it's default behavior of following the path until it bumps into something or it reaches the finish line.
+	   */
 	  switch (robot_state) {
+	  	  // do not move until the bumper switch is pressed
 		  case idle:
 			  stop();
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = follow_line;
 			  }
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "idle\r\n", strlen("idle\r\n"));
 			  break;
+		  // follow the line until the bumper switch is pressed
 		  case follow_line:
+			  // if all IR sensors are blocked, possibly at the T intersection or at the finish line
 			  if (left2 && left1 && center && right1 && right2) {
-				  sw_pushed = 0;
 				  record_current_enc_pos();
 				  robot_state = t_intersection;
 			  }
+			  // if right1 is blocked and left1 is not blocked, robot is moving off the line so steer right
 			  else if (right1 && !left1) {
 				  steer_right();
 			  }
+			  // if left1 is blocked and right1 is not blocked, robot is moving off the line so steer left
 			  else if (left1 && !right1) {
 				  steer_left();
 			  }
+			  // if none of the IR sensors are blocked or only the center IR sensor is blocked, robot is on the line so keep moving forward
 			  else {
 				  move_forward();
 			  }
 
+			  // if the bumper switch is pressed, turn the robot back the way it came
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  record_current_enc_pos();
 				  robot_state = turn_around;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "follow_line\r\n", strlen("follow_line\r\n"));
 			  break;
+		  // follow the line until there is a fork in the path
 		  case follow_line_until_turn:
+			  // if all IR sensors are blocked, possibly at the T intersection or at the finish line
 			  if (left2 && left1 && center && right1 && right2) {
-				  sw_pushed = 0;
 				  record_current_enc_pos();
 				  robot_state = t_intersection;
 			  }
+			  // if right2 is blocked, the robot is at a fork in the path and should turn right
 			  else if (right2) {
 				  record_current_enc_pos();
 				  robot_state = turn_right;
 			  }
+			  // if left2 is blocked, the robot is at a fork in the path and should turn left
 			  else if (left2) {
 				  record_current_enc_pos();
 				  robot_state = turn_left;
 			  }
+			  // if right1 is blocked and left1 is not blocked, robot is moving off the line so steer right
 			  else if (right1 && !left1) {
 				  steer_right();
 			  }
+			  // if left1 is blocked and right1 is not blocked, robot is moving off the line so steer left
 			  else if (left1 && !right1) {
 				  steer_left();
 			  }
+			  // if none of the IR sensors are blocked or only the center IR sensor is blocked, robot is on the line so keep moving forward
 			  else {
 				  move_forward();
 			  }
 
+			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "follow_line_until_turn\r\n", strlen("follow_line_until_turn\r\n"));
 			  break;
+		  // turn right onto a different path
 		  case turn_right:
+			  // keep turning right for a while to move the center IR sensor off the old path
 			  if (suff_dist_traveled(5)) {
+				  // if the center IR sensor is blocked, the robot is on the new path
 				  if (center) {
 					  if (after_turn_around) {
 						  after_turn_around = 0;
@@ -252,15 +268,17 @@ int main(void)
 				  steer_right();
 			  }
 
+			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "turn_right\r\n", strlen("turn_right\r\n"));
 			  break;
+		  // turn left onto a different path
 		  case turn_left:
+			  // keep turning left for a while to move the center IR sensor off the old path
 			  if (suff_dist_traveled(5)) {
+				  // if the center IR sensor is blocked, the robot is on the new path
 				  if (center) {
 					  if (after_turn_around) {
 						  after_turn_around = 0;
@@ -278,17 +296,18 @@ int main(void)
 				  steer_left();
 			  }
 
+			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "turn_left\r\n", strlen("turn_left\r\n"));
 			  break;
+		  // turn the robot around 180 degrees back onto the path it has already traversed
 		  case turn_around:
-			  // while in this state turn the robot around 180 degrees back onto the path it has already traversed
+			  // move the robot back to ensure it won't bump into the obstacle when turning around
 			  if (suff_dist_traveled(5)) {
 
+				  // set this variable to ensure the robot's state will transition into the follow_line_until_turn state instead of the follow_line state
 				  after_turn_around = 1;
 
 				  record_current_enc_pos();
@@ -300,20 +319,21 @@ int main(void)
 				  move_backward();
 			  }
 
-
+			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "turn_around\r\n", strlen("turn_around\r\n"));
 			  break;
+		  // determine whether the robot is at a T intersection or has reached the finish line
 		  case t_intersection:
+			  // move forward a little bit and check the IR sensors again
 			  if (suff_dist_traveled(2)) {
+				  // if all sensors are blocked the robot is at the finish line (because the finish line is thicker than the normal path)
 				  if (left2 && left1 && center && right1 && right2) {
-					  sw_pushed = 0;
 					  robot_state = finish;
 				  }
+				  // otherwise the robot is at a T intersection so turn onto the right path
 				  else {
 					  robot_state = turn_right;
 				  }
@@ -322,21 +342,20 @@ int main(void)
 				  move_forward();
 			  }
 
+			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "t_intersection\r\n", strlen("t_intersection\r\n"));
 			  break;
+		  // stop the robot when it has reached the finish line
 		  case finish:
 			  stop();
+			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = idle;
 			  }
-
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*) "finish\r\n", strlen("finish\r\n"));
 			  break;
 		  default:
 			  break;
@@ -763,14 +782,18 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+// generating the PWM signals to drive the motors requires providing the on time of the signal as a fraction of the Period field of the timer
+// this function accepts a pulse_width parameter in percentage and generates an integer with the required on time for the PWM signal
 uint16_t calc_pulse_val(TIM_HandleTypeDef *htim, uint8_t pulse_width) {
 	return (uint16_t) (((float) (pulse_width) / 100.0) * htim->Init.Period);
 }
 
+// this function accepts a pulse_width parameter in percentage and generates an integer with the required off time for the PWM signal
 uint16_t calc_inv_pulse_val(TIM_HandleTypeDef *htim, uint8_t pulse_width) {
 	return (uint16_t) (((float) (100 - pulse_width) / 100.0) * htim->Init.Period);
 }
 
+// this function records the current encoder count of the wheels
 void record_current_enc_pos(void) {
 	wheel_enc_count[0] = front_left_enc_count;
 	wheel_enc_count[1] = front_right_enc_count;
@@ -778,6 +801,7 @@ void record_current_enc_pos(void) {
 	wheel_enc_count[3] = back_right_enc_count;
 }
 
+// this function determines whether all 4 wheels have traveled the required number of indentations (travel_dist) of the encoders
 uint8_t suff_dist_traveled(uint32_t travel_dist) {
 	if ((front_left_enc_count - wheel_enc_count[0]) >= travel_dist &&
 	    (front_right_enc_count - wheel_enc_count[1]) >= travel_dist &&
@@ -791,7 +815,6 @@ uint8_t suff_dist_traveled(uint32_t travel_dist) {
 }
 
 void move_forward(void) {
-	// code using PWM generation
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, slow_pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_SET);
@@ -810,7 +833,6 @@ void move_forward(void) {
 }
 
 void move_backward(void) {
-	// code using PWM generation
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_pulse_val(&htim2, slow_pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_RESET);
@@ -829,7 +851,6 @@ void move_backward(void) {
 }
 
 void steer_right(void) {
-	// code using PWM generation
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, fast_pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_SET);
@@ -848,7 +869,6 @@ void steer_right(void) {
 }
 
 void steer_left(void) {
-	// code using PWM generation
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_pulse_val(&htim2, fast_pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_RESET);
@@ -867,7 +887,6 @@ void steer_left(void) {
 }
 
 void stop(void) {
-	// code using PWM generation
 	HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_RESET);
 
@@ -917,9 +936,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 		HAL_GPIO_Init(bumper_sw_GPIO_Port, &GPIO_InitStruct);
 	}
 	else if (htim->Instance == TIM16) {
-		// transmit the state of the IR sensors over UART
-		//sprintf(msg, "IR sensors left to right: %d	%d	%d	%d	%d	Encoders: fl %lu fr %lu bl %lu br %lu\n\r", left2, left1, center, right1, right2, front_left_enc_count, front_right_enc_count, back_left_enc_count, back_right_enc_count);
-		//HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
+		// transmit the state of the IR sensors over UART interface
+		sprintf(msg, "IR sensors left to right: %d	%d	%d	%d	%d	Encoders: fl %lu fr %lu bl %lu br %lu\n\r", left2, left1, center, right1, right2, front_left_enc_count, front_right_enc_count, back_left_enc_count, back_right_enc_count);
+		HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
 	}
 	else {
 
