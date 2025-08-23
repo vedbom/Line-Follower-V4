@@ -24,10 +24,18 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef enum{
+	idle, manual_mode, follow_line, follow_line_until_turn, turn_right, turn_left, turn_around, t_intersection, finish
+} state;
+
+typedef enum{
+	start_seq1, start_seq2, length, payload, checksum, send_data, req_resend, finished
+} receive_fsm;
 
 /* USER CODE END PTD */
 
@@ -41,24 +49,30 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim1;						// timer used in PWM mode to drive the robot's right motors
-TIM_HandleTypeDef htim2;						// timer used in PWM mode to drive the robot's left motors
-TIM_HandleTypeDef htim3;						// timer used in input capture mode to measure the encoders connected to the robot's wheels
-TIM_HandleTypeDef htim6;						// timer used to debounce the bumper switch in front of the robot
-TIM_HandleTypeDef htim16;						// timer used to intermittently send updates regarding the robot's state using the wireless transmitter
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim6;
+TIM_HandleTypeDef htim16;
 
 UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE BEGIN PV */
-typedef enum{
-	idle, follow_line, follow_line_until_turn, turn_right, turn_left, turn_around, t_intersection, finish
-} state;
-
 state robot_state = idle;
 
 uint8_t sw_pushed = 0;
 
+uint8_t remote_msg_received = 1;
+
 char msg[100] = "";
+
+uint8_t msg_from_remote[50];
+
+uint8_t left_joy_x = 0;
+uint8_t left_joy_y = 0;
+uint8_t right_joy_x = 0;
+uint8_t right_joy_y = 0;
 
 // state of the IR sensors under the robot (0 = white and 1 = black)
 uint8_t left2 = 0;
@@ -86,6 +100,7 @@ uint32_t wheel_enc_count[4] = {0, 0, 0, 0};		// front left, front right, back le
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM16_Init(void);
@@ -99,6 +114,9 @@ void steer_right(void);
 void steer_left(void);
 void stop(void);
 void record_current_enc_pos(void);
+void transmit_data(uint8_t resend);
+void process_data(uint8_t *darray, uint8_t start, uint8_t end);
+
 uint8_t suff_dist_traveled(uint32_t travel_dist);
 
 uint16_t calc_pulse_val(TIM_HandleTypeDef *htim, uint8_t pulse_width);
@@ -138,6 +156,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM6_Init();
   MX_USART1_UART_Init();
   MX_TIM16_Init();
@@ -160,6 +179,69 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  // check if any messages were sent from the remote controller
+//	  if (remote_msg_received) {
+//		  HAL_UART_Receive_DMA(&huart1, (uint8_t *) msg_from_remote, 18);
+//		  remote_msg_received = 0;
+//	  }
+
+	  // receive data from the remote control
+	  if (remote_msg_received) {
+		  HAL_GPIO_WritePin(debug_sig_GPIO_Port, debug_sig_Pin, GPIO_PIN_SET);
+		  HAL_UART_Receive_DMA(&huart1, msg_from_remote, 10);
+		  remote_msg_received = 0;
+
+		  uint8_t msg_len = 0;
+		  receive_fsm receiver_state = start_seq1;
+		  while (receiver_state != finished) {
+			  // state machine for processing the received bytes of data
+			  switch(receiver_state) {
+			  case start_seq1:
+				  if ((char) (msg_from_remote[0]) == 'W') {
+					  receiver_state = start_seq2;
+				  }
+				  else {
+					  receiver_state = req_resend;
+				  }
+				  break;
+			  case start_seq2:
+				  if ((char) (msg_from_remote[1] == 'Z')) {
+					  receiver_state = length;
+				  }
+				  else {
+					  receiver_state = req_resend;
+				  }
+				  break;
+			  case length:
+				  msg_len = msg_from_remote[2];
+				  receiver_state = payload;
+				  break;
+			  case payload:
+				  process_data(msg_from_remote, 3, 3 + msg_len);
+				  receiver_state = checksum;
+				  break;
+			  case checksum:
+				  // perform a cyclic redundancy check
+				  // this is not implemented yet!
+				  receiver_state = send_data;
+				  break;
+			  case send_data:
+				  // transmit data from the robot to the remote control
+				  transmit_data(0);
+				  receiver_state = finished;
+				  break;
+			  case req_resend:
+				  transmit_data(1);
+				  receiver_state = finished;
+				  break;
+			  default:
+				  break;
+			  }
+		  }
+	  }
+
+	  HAL_GPIO_WritePin(debug_sig_GPIO_Port, debug_sig_Pin, GPIO_PIN_RESET);
+
 	  // sample the IR sensors and store the result in the corresponding variables
 	  left2 = (HAL_GPIO_ReadPin(GPIOB, left2_ir_Pin) == GPIO_PIN_SET) ? 1 : 0;
 	  left1 = (HAL_GPIO_ReadPin(GPIOB, left1_ir_Pin) == GPIO_PIN_SET) ? 1 : 0;
@@ -186,7 +268,7 @@ int main(void)
 		  // follow the line until the bumper switch is pressed
 		  case follow_line:
 			  // if all IR sensors are blocked, possibly at the T intersection or at the finish line
-			  if (left2 && left1 && center && right1 && right2) {
+			  if (left1 && center && right1) {
 				  record_current_enc_pos();
 				  robot_state = t_intersection;
 			  }
@@ -213,7 +295,7 @@ int main(void)
 		  // follow the line until there is a fork in the path
 		  case follow_line_until_turn:
 			  // if all IR sensors are blocked, possibly at the T intersection or at the finish line
-			  if (left2 && left1 && center && right1 && right2) {
+			  if (left1 && center && right1) {
 				  record_current_enc_pos();
 				  robot_state = t_intersection;
 			  }
@@ -731,6 +813,22 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel2_3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -747,6 +845,9 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, left_in2_Pin|left_in4_Pin|right_in2_Pin|right_in4_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(debug_sig_GPIO_Port, debug_sig_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : left_in2_Pin left_in4_Pin right_in2_Pin right_in4_Pin */
   GPIO_InitStruct.Pin = left_in2_Pin|left_in4_Pin|right_in2_Pin|right_in4_Pin;
@@ -778,6 +879,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(bumper_sw_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : debug_sig_Pin */
+  GPIO_InitStruct.Pin = debug_sig_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(debug_sig_GPIO_Port, &GPIO_InitStruct);
 
 }
 
@@ -900,6 +1008,43 @@ void stop(void) {
 	HAL_GPIO_WritePin(GPIOA, right_in4_Pin, GPIO_PIN_RESET);
 }
 
+void transmit_data(uint8_t resend) {
+	uint8_t msg_to_remote[50];
+
+	msg_to_remote[0] = 'Q';
+	msg_to_remote[1] = 'Z';
+
+	// number of payload bytes
+	msg_to_remote[2] = 5;
+
+	// request the remote to resend the data
+	if (resend) {
+		msg_to_remote[3] = 'R';
+		msg_to_remote[4] = 0;
+		msg_to_remote[5] = 0;
+		msg_to_remote[6] = 0;
+		msg_to_remote[7] = 0;
+	}
+	// otherwise transmit data to the remote as normal
+	else {
+		msg_to_remote[3] = left2;
+		msg_to_remote[4] = left1;
+		msg_to_remote[5] = center;
+		msg_to_remote[6] = right1;
+		msg_to_remote[7] = right2;
+	}
+
+	msg_to_remote[8] = 0;
+	HAL_UART_Transmit(&huart1, msg_to_remote, 9, HAL_MAX_DELAY);
+}
+
+void process_data(uint8_t *darray, uint8_t start, uint8_t end) {
+	left_joy_x = *(darray + start);
+	left_joy_y = *(darray + start + 1);
+	right_joy_x = *(darray + start + 2);
+	right_joy_y = *(darray + start + 3);
+}
+
 void EXTI2_3_IRQHandler(void) {
 	HAL_GPIO_EXTI_IRQHandler(bumper_sw_Pin);
 }
@@ -937,8 +1082,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	}
 	else if (htim->Instance == TIM16) {
 		// transmit the state of the IR sensors over UART interface
-		sprintf(msg, "IR sensors left to right: %d	%d	%d	%d	%d	Encoders: fl %lu fr %lu bl %lu br %lu\n\r", left2, left1, center, right1, right2, front_left_enc_count, front_right_enc_count, back_left_enc_count, back_right_enc_count);
-		HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
+		//sprintf(msg, "IR: %d %d %d %d %d", left2, left1, center, right1, right2);
+		//sprintf(msg, "%2d %2d %2d %2d\r\n", left_joy_x, left_joy_y, right_joy_x, right_joy_y);
+		//HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
 	}
 	else {
 
@@ -963,6 +1109,10 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
 
 		}
 	}
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	remote_msg_received = 1;
 }
 
 /* USER CODE END 4 */

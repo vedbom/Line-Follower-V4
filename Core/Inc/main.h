@@ -100,6 +100,8 @@ void Error_Handler(void);
 #define SWCLK_GPIO_Port GPIOA
 #define bumper_sw_Pin GPIO_PIN_2
 #define bumper_sw_GPIO_Port GPIOD
+#define debug_sig_Pin GPIO_PIN_5
+#define debug_sig_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
