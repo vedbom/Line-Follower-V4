@@ -61,18 +61,25 @@ DMA_HandleTypeDef hdma_usart1_rx;
 /* USER CODE BEGIN PV */
 state robot_state = idle;
 
-uint8_t sw_pushed = 0;
+volatile uint8_t sw_pushed = 0;
 
-uint8_t remote_msg_received = 1;
+volatile uint8_t remote_msg_received = 1;
 
 char msg[100] = "";
 
 uint8_t msg_from_remote[50];
 
-uint8_t left_joy_x = 0;
-uint8_t left_joy_y = 0;
-uint8_t right_joy_x = 0;
-uint8_t right_joy_y = 0;
+uint8_t left_joy_x = 50;
+uint8_t left_joy_y = 50;
+uint8_t right_joy_x = 50;
+uint8_t right_joy_y = 50;
+
+uint8_t in_manual_mode = 0;
+uint8_t start_robot = 0;
+uint8_t in_tank_mode = 0;
+uint8_t manual_mode_pulse_width = 50;
+
+uint8_t started_by_remote = 0;
 
 // state of the IR sensors under the robot (0 = white and 1 = black)
 uint8_t left2 = 0;
@@ -87,10 +94,10 @@ uint8_t slow_pulse_width = 50;					// pulse width of the signal that drives the 
 uint8_t fast_pulse_width = 98;					// pulse width of the signal that drives the motors to move the robot fast (in percentage!)
 
 // variables to keep track of the current encoder count from the timer
-uint32_t front_left_enc_count = 0;
-uint32_t front_right_enc_count = 0;
-uint32_t back_left_enc_count = 0;
-uint32_t back_right_enc_count = 0;
+volatile uint32_t front_left_enc_count = 0;
+volatile uint32_t front_right_enc_count = 0;
+volatile uint32_t back_left_enc_count = 0;
+volatile uint32_t back_right_enc_count = 0;
 
 // variables to keep track of the previous encoder count from the timer
 uint32_t wheel_enc_count[4] = {0, 0, 0, 0};		// front left, front right, back left, back right
@@ -108,14 +115,14 @@ static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
-void move_forward(void);
-void move_backward(void);
-void steer_right(void);
-void steer_left(void);
+void move_forward(uint8_t pulse_width);
+void move_backward(uint8_t pulse_width);
+void steer_right(uint8_t pulse_width);
+void steer_left(uint8_t pulse_width);
 void stop(void);
 void record_current_enc_pos(void);
 void transmit_data(uint8_t resend);
-void process_data(uint8_t *darray, uint8_t start, uint8_t end);
+uint8_t process_data(uint8_t *darray, uint8_t start, uint8_t end);
 
 uint8_t suff_dist_traveled(uint32_t travel_dist);
 
@@ -179,16 +186,10 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  // check if any messages were sent from the remote controller
-//	  if (remote_msg_received) {
-//		  HAL_UART_Receive_DMA(&huart1, (uint8_t *) msg_from_remote, 18);
-//		  remote_msg_received = 0;
-//	  }
-
 	  // receive data from the remote control
 	  if (remote_msg_received) {
 		  HAL_GPIO_WritePin(debug_sig_GPIO_Port, debug_sig_Pin, GPIO_PIN_SET);
-		  HAL_UART_Receive_DMA(&huart1, msg_from_remote, 10);
+		  HAL_UART_Receive_DMA(&huart1, msg_from_remote, 12);
 		  remote_msg_received = 0;
 
 		  uint8_t msg_len = 0;
@@ -216,10 +217,12 @@ int main(void)
 				  msg_len = msg_from_remote[2];
 				  receiver_state = payload;
 				  break;
-			  case payload:
-				  process_data(msg_from_remote, 3, 3 + msg_len);
+			  case payload:	{
+				  // the process_data function will return 0 if the robot requested a resend
+				  uint8_t ret_val = process_data(msg_from_remote, 3, 3 + msg_len);
 				  receiver_state = checksum;
 				  break;
+			  }
 			  case checksum:
 				  // perform a cyclic redundancy check
 				  // this is not implemented yet!
@@ -260,9 +263,67 @@ int main(void)
 	  	  // do not move until the bumper switch is pressed
 		  case idle:
 			  stop();
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (!in_manual_mode && start_robot) {
+				  robot_state = follow_line;
+				  started_by_remote = 1;
+			  }
+			  else {
+
+			  }
+
 			  if (sw_pushed) {
 				  sw_pushed = 0;
 				  robot_state = follow_line;
+			  }
+			  break;
+		  // in manual mode the robot is directly controlled by the remote control
+		  case manual_mode:
+			  if (in_tank_mode) {
+				  if (left_joy_y < 25 && right_joy_y > 75) {
+					  steer_left(manual_mode_pulse_width);
+				  }
+				  else if (left_joy_y > 75 && right_joy_y < 25) {
+					  steer_right(manual_mode_pulse_width);
+				  }
+				  else if (left_joy_y > 75 && right_joy_y > 75) {
+					  move_forward(manual_mode_pulse_width);
+				  }
+				  else if (left_joy_y < 25 && right_joy_y < 25) {
+					  move_backward(manual_mode_pulse_width);
+				  }
+				  else {
+					  stop();
+				  }
+			  }
+			  else {
+				  if (left_joy_y < 25) {
+					  move_backward(manual_mode_pulse_width);
+				  }
+				  else if (left_joy_y > 75) {
+					  move_forward(manual_mode_pulse_width);
+				  }
+				  else if (right_joy_x < 25) {
+					  steer_left(manual_mode_pulse_width);
+				  }
+				  else if (right_joy_x > 75) {
+					  steer_right(manual_mode_pulse_width);
+				  }
+				  else {
+					  stop();
+				  }
+			  }
+
+			  if (!in_manual_mode) {
+				  robot_state = idle;
+			  }
+
+			  if (sw_pushed) {
+				  sw_pushed = 0;
+				  robot_state = idle;
 			  }
 			  break;
 		  // follow the line until the bumper switch is pressed
@@ -274,15 +335,26 @@ int main(void)
 			  }
 			  // if right1 is blocked and left1 is not blocked, robot is moving off the line so steer right
 			  else if (right1 && !left1) {
-				  steer_right();
+				  steer_right(fast_pulse_width);
 			  }
 			  // if left1 is blocked and right1 is not blocked, robot is moving off the line so steer left
 			  else if (left1 && !right1) {
-				  steer_left();
+				  steer_left(fast_pulse_width);
 			  }
 			  // if none of the IR sensors are blocked or only the center IR sensor is blocked, robot is on the line so keep moving forward
 			  else {
-				  move_forward();
+				  move_forward(slow_pulse_width);
+			  }
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (started_by_remote && !start_robot) {
+				  robot_state = idle;
+				  started_by_remote = 0;
+			  }
+			  else {
+
 			  }
 
 			  // if the bumper switch is pressed, turn the robot back the way it came
@@ -311,15 +383,26 @@ int main(void)
 			  }
 			  // if right1 is blocked and left1 is not blocked, robot is moving off the line so steer right
 			  else if (right1 && !left1) {
-				  steer_right();
+				  steer_right(fast_pulse_width);
 			  }
 			  // if left1 is blocked and right1 is not blocked, robot is moving off the line so steer left
 			  else if (left1 && !right1) {
-				  steer_left();
+				  steer_left(fast_pulse_width);
 			  }
 			  // if none of the IR sensors are blocked or only the center IR sensor is blocked, robot is on the line so keep moving forward
 			  else {
-				  move_forward();
+				  move_forward(slow_pulse_width);
+			  }
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (started_by_remote && !start_robot) {
+				  robot_state = idle;
+				  started_by_remote = 0;
+			  }
+			  else {
+
 			  }
 
 			  // if the bumper switch is pressed, put the robot in the idle state
@@ -343,11 +426,22 @@ int main(void)
 					  }
 				  }
 				  else {
-					  steer_right();
+					  steer_right(fast_pulse_width);
 				  }
 			  }
 			  else {
-				  steer_right();
+				  steer_right(fast_pulse_width);
+			  }
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (started_by_remote && !start_robot) {
+				  robot_state = idle;
+				  started_by_remote = 0;
+			  }
+			  else {
+
 			  }
 
 			  // if the bumper switch is pressed, put the robot in the idle state
@@ -371,11 +465,22 @@ int main(void)
 					  }
 				  }
 				  else {
-					  steer_left();
+					  steer_left(fast_pulse_width);
 				  }
 			  }
 			  else {
-				  steer_left();
+				  steer_left(fast_pulse_width);
+			  }
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (started_by_remote && !start_robot) {
+				  started_by_remote = 0;
+				  robot_state = idle;
+			  }
+			  else {
+
 			  }
 
 			  // if the bumper switch is pressed, put the robot in the idle state
@@ -398,7 +503,18 @@ int main(void)
 				  robot_state = turn_left;
 			  }
 			  else {
-				  move_backward();
+				  move_backward(slow_pulse_width);
+			  }
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (started_by_remote && !start_robot) {
+				  started_by_remote = 0;
+				  robot_state = idle;
+			  }
+			  else {
+
 			  }
 
 			  // if the bumper switch is pressed, put the robot in the idle state
@@ -421,7 +537,18 @@ int main(void)
 				  }
 			  }
 			  else {
-				  move_forward();
+				  move_forward(slow_pulse_width);
+			  }
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (started_by_remote && !start_robot) {
+				  started_by_remote = 0;
+				  robot_state = idle;
+			  }
+			  else {
+
 			  }
 
 			  // if the bumper switch is pressed, put the robot in the idle state
@@ -433,6 +560,17 @@ int main(void)
 		  // stop the robot when it has reached the finish line
 		  case finish:
 			  stop();
+
+			  if (in_manual_mode) {
+				  robot_state = manual_mode;
+			  }
+			  else if (!start_robot) {
+				  robot_state = idle;
+			  }
+			  else {
+
+			  }
+
 			  // if the bumper switch is pressed, put the robot in the idle state
 			  if (sw_pushed) {
 				  sw_pushed = 0;
@@ -922,74 +1060,74 @@ uint8_t suff_dist_traveled(uint32_t travel_dist) {
 	}
 }
 
-void move_forward(void) {
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, slow_pulse_width));
+void move_forward(uint8_t pulse_width) {
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_SET);
 
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, calc_inv_pulse_val(&htim2, slow_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, calc_inv_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, left_in4_Pin, GPIO_PIN_SET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_pulse_val(&htim1, slow_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, right_in2_Pin, GPIO_PIN_RESET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_pulse_val(&htim1, slow_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, right_in4_Pin, GPIO_PIN_RESET);
 }
 
-void move_backward(void) {
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_pulse_val(&htim2, slow_pulse_width));
+void move_backward(uint8_t pulse_width) {
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_RESET);
 
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3,calc_pulse_val(&htim2, slow_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3,calc_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, left_in4_Pin, GPIO_PIN_RESET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_inv_pulse_val(&htim1, slow_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_inv_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, right_in2_Pin, GPIO_PIN_SET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_inv_pulse_val(&htim1, slow_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_inv_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, right_in4_Pin, GPIO_PIN_SET);
 }
 
-void steer_right(void) {
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, fast_pulse_width));
+void steer_right(uint8_t pulse_width) {
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_inv_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_SET);
 
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, calc_inv_pulse_val(&htim2, fast_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, calc_inv_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, left_in4_Pin, GPIO_PIN_SET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_inv_pulse_val(&htim1, fast_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_inv_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, right_in2_Pin, GPIO_PIN_SET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_inv_pulse_val(&htim1, fast_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_inv_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, right_in4_Pin, GPIO_PIN_SET);
 }
 
-void steer_left(void) {
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_pulse_val(&htim2, fast_pulse_width));
+void steer_left(uint8_t pulse_width) {
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, calc_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, left_in2_Pin, GPIO_PIN_RESET);
 
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, calc_pulse_val(&htim2, fast_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, calc_pulse_val(&htim2, pulse_width));
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, left_in4_Pin, GPIO_PIN_RESET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_pulse_val(&htim1, fast_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, calc_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_GPIO_WritePin(GPIOA, right_in2_Pin, GPIO_PIN_RESET);
 
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_pulse_val(&htim1, fast_pulse_width));
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, calc_pulse_val(&htim1, pulse_width));
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_GPIO_WritePin(GPIOA, right_in4_Pin, GPIO_PIN_RESET);
 }
@@ -1038,11 +1176,29 @@ void transmit_data(uint8_t resend) {
 	HAL_UART_Transmit(&huart1, msg_to_remote, 9, HAL_MAX_DELAY);
 }
 
-void process_data(uint8_t *darray, uint8_t start, uint8_t end) {
-	left_joy_x = *(darray + start);
-	left_joy_y = *(darray + start + 1);
-	right_joy_x = *(darray + start + 2);
-	right_joy_y = *(darray + start + 3);
+uint8_t process_data(uint8_t *darray, uint8_t start, uint8_t end) {
+	if (*(darray + start) == 'R') {
+		in_manual_mode = 0;
+		start_robot = 0;
+		in_tank_mode = 0;
+		manual_mode_pulse_width = 50;
+		left_joy_x = 50;
+		left_joy_y = 50;
+		right_joy_x = 50;
+		right_joy_y = 50;
+		return 0;
+	}
+	else {
+		in_manual_mode = *(darray + start);
+		start_robot = *(darray + start + 1);
+		in_tank_mode = *(darray + start + 2);
+		manual_mode_pulse_width = *(darray + start + 3);
+		left_joy_x = *(darray + start + 4);
+		left_joy_y = *(darray + start + 5);
+		right_joy_x = *(darray + start + 6);
+		right_joy_y = *(darray + start + 7);
+		return 1;
+	}
 }
 
 void EXTI2_3_IRQHandler(void) {
@@ -1081,10 +1237,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 		HAL_GPIO_Init(bumper_sw_GPIO_Port, &GPIO_InitStruct);
 	}
 	else if (htim->Instance == TIM16) {
-		// transmit the state of the IR sensors over UART interface
-		//sprintf(msg, "IR: %d %d %d %d %d", left2, left1, center, right1, right2);
-		//sprintf(msg, "%2d %2d %2d %2d\r\n", left_joy_x, left_joy_y, right_joy_x, right_joy_y);
-		//HAL_UART_Transmit_IT(&huart1, (uint8_t*)msg, strlen(msg));
+		HAL_UART_DMAStop(&huart1);
+		HAL_UART_Receive_DMA(&huart1, msg_from_remote, 12);
 	}
 	else {
 
@@ -1113,6 +1267,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	remote_msg_received = 1;
+	__HAL_TIM_SET_COUNTER(&htim16, 0);
 }
 
 /* USER CODE END 4 */
